@@ -1,0 +1,39 @@
+# 数据库表记录数一致性校验工具
+
+## 功能说明
+
+用于比对源数据库和目标数据库中同名表的记录数，支持批量校验多个数据库。
+
+## 使用方法
+
+编辑 `config.ini` 文件，配置所有参数：
+
+```ini
+[diff]
+src.instance = mysql://user:pass@host:port
+dst.instance = mysql://user:pass@host:port
+dbs = test%,db1,db2
+ignore_tables = tmp_log,sys_history
+threshold = 0
+output = diff_result.csv
+```
+
+然后运行：
+```bash
+python diff.py
+```
+
+## 配置说明
+
+- `src.instance`: 源数据库连接串（格式：`mysql://user:pass@host:port`）
+- `dst.instance`: 目标数据库连接串（格式同上）
+- `dbs`: 数据库列表，支持通配符 `%`（如 `test%`）
+- `ignore_tables`: 忽略校验的表名，逗号分隔
+- `threshold`: 允许的记录数差异阈值（默认 0）
+- `output`: 校验结果 CSV 文件路径（可选）
+- `src.snapshot_ts` / `dst.snapshot_ts`: TiDB 快照时间戳（可选）
+
+## 输出结果
+
+校验结果会输出到控制台，如配置了 `output` 参数，会同时导出为 CSV 文件。
+
