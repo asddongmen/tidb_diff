@@ -23,7 +23,7 @@ devenv\Scripts\activate
 ### 3. 安装依赖
 
 ```bash
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
 ## 功能说明
