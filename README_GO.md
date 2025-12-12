@@ -37,7 +37,7 @@ go build -o tidb_diff main.go
 
 ## Configuration
 
-The tool uses the same `config.ini` file as the Python version:
+The tool uses `config.ini` file:
 
 ```ini
 [diff]
@@ -89,7 +89,7 @@ table_concurrency = 10
 
 ## Performance Optimizations
 
-The Go version implements several performance optimizations:
+The tool implements several performance optimizations:
 
 1. **Table-Level Concurrency** (when `use_stats=false`)
    - Each table is counted concurrently with independent `COUNT(1)` queries
@@ -113,11 +113,11 @@ The Go version implements several performance optimizations:
 - **Need exact results**: Set `use_stats = false` to use exact COUNT
 - **Quick check**: Set `use_stats = true` to use statistics mode
 
-## Differences from Python Version
+## Features
 
 1. **Performance**: Go's goroutines provide efficient concurrency with table-level parallel counting
 2. **Type Safety**: Strong typing helps catch errors at compile time
-3. **Binary Distribution**: Single executable file, no Python runtime needed
+3. **Binary Distribution**: Single executable file, no runtime dependencies needed
 4. **Memory Efficiency**: Generally lower memory footprint
 5. **Advanced Concurrency**: Table-level concurrency for COUNT operations, significantly faster for large-scale comparisons
 

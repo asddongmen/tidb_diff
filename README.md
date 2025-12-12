@@ -9,24 +9,6 @@
 
 ## 安装
 
-### Python 版本
-
-```bash
-git clone https://github.com/asddongmen/tidb_diff.git
-cd tidb_diff
-
-# 可选：创建并激活虚拟环境
-python3 -m venv devenv
-source devenv/bin/activate   # Windows: devenv\Scripts\activate
-
-# 安装依赖
-pip install -r requirements.txt
-```
-
-依赖：`pymysql`
-
-### Go 版本
-
 ```bash
 git clone https://github.com/asddongmen/tidb_diff.git
 cd tidb_diff
@@ -66,6 +48,39 @@ make help
 ```
 
 编译后的二进制文件位于 `build/linux/amd64/tidb_diff` 和 `build/linux/arm64/tidb_diff`
+
+### 从 GitHub Releases 下载（推荐）
+
+如果不想自己编译，可以直接从 GitHub Releases 下载预编译的二进制文件：
+
+```bash
+# 下载预编译的二进制文件包（请替换为实际的版本号和仓库地址）
+wget https://github.com/cwen0/tidb_diff/releases/download/v0.0.2/build.tar.gz
+
+# 解压
+tar -zxvf build.tar.gz
+
+# 下载配置文件模板
+wget https://raw.githubusercontent.com/cwen0/tidb_diff/refs/heads/main/config.ini
+
+# 编辑配置文件（根据实际情况修改数据库连接信息）
+vi config.ini
+# 或使用其他编辑器
+# nano config.ini
+
+# 运行（根据你的系统架构选择对应的二进制文件）
+# Linux amd64
+./build/linux/amd64/tidb_diff --config config.ini > diff.log 2>&1
+
+# Linux arm64
+# ./build/linux/arm64/tidb_diff --config config.ini > diff.log 2>&1
+```
+
+**注意**：
+- 请将 `v0.0.2` 替换为最新的版本号
+- 请将 `cwen0/tidb_diff` 替换为实际的 GitHub 仓库地址
+- 根据你的系统架构（amd64 或 arm64）和操作系统（Linux、macOS、Windows）选择对应的二进制文件
+- 首次运行前需要编辑 `config.ini` 配置文件，设置正确的数据库连接信息
 
 ## 配置
 
@@ -121,16 +136,6 @@ table_concurrency = 10
 
 ## 使用
 
-### Python 版本
-
-```bash
-python diff.py                  # 使用默认 config.ini
-# 或指定配置并输出到日志
-python diff.py --config config.ini > diff.log 2>&1
-```
-
-### Go 版本
-
 ```bash
 # 直接运行
 go run main.go                  # 使用默认 config.ini
@@ -165,9 +170,9 @@ go run main.go --config config.ini
 
 ## 性能优化说明
 
-### Go 版本性能特性
+### 性能特性
 
-Go 版本实现了以下性能优化：
+本工具实现了以下性能优化：
 
 1. **表级别并发统计**（`use_stats=false` 时）
    - 每个表独立并发执行 `COUNT(1)` 查询
