@@ -55,7 +55,7 @@ make help
 
 ```bash
 # 下载预编译的二进制文件包（请替换为实际的版本号和仓库地址）
-wget https://github.com/cwen0/tidb_diff/releases/download/v0.0.3/build.tar.gz
+wget https://github.com/cwen0/tidb_diff/releases/download/v0.0.2/build.tar.gz
 
 # 解压
 tar -zxvf build.tar.gz
@@ -77,7 +77,7 @@ vi config.ini
 ```
 
 **注意**：
-- 请将 `v0.0.3` 替换为最新的版本号
+- 请将 `v0.0.2` 替换为最新的版本号
 - 请将 `cwen0/tidb_diff` 替换为实际的 GitHub 仓库地址
 - 根据你的系统架构（amd64 或 arm64）和操作系统（Linux、macOS、Windows）选择对应的二进制文件
 - 首次运行前需要编辑 `config.ini` 配置文件，设置正确的数据库连接信息
@@ -94,10 +94,6 @@ dbs = test%
 ignore_tables = tmp_log, sys_history
 threshold = 0
 output = diff_result.csv
-
-# 可选 snapshot_ts（TiDB）
-# src.snapshot_ts = 462796050923520000
-# dst.snapshot_ts = 462796051305201667
 
 # 对比内容：rows(逐表行数), tables(库级表数), indexes(库级索引数), views(库级视图数)
 # 留空或不填则默认全部启用
@@ -167,6 +163,10 @@ write_timeout_seconds = 0
 # 默认 2 次，范围 0-5
 # 对于网络不稳定的环境，可以设置为 3-5
 max_retries = 2
+
+# 可选 snapshot_ts（TiDB）
+# src.snapshot_ts = 462796050923520000
+# dst.snapshot_ts = 462796051305201667
 ```
 
 ### 配置项说明
@@ -180,6 +180,49 @@ max_retries = 2
 - `output`: CSV 输出文件路径（可选）
 - `compare`: 对比项，可选值：`rows`（逐表行数）、`tables`（库级表数）、`indexes`（库级索引数）、`views`（库级视图数），留空默认全部启用
 - `src.snapshot_ts` / `dst.snapshot_ts`: TiDB 快照时间戳（可选，用于对比历史数据）
+  - **【重要前提条件 - 必须满足】**：
+    - 使用 `src.snapshot_ts` 和 `dst.snapshot_ts` 的**前提条件是 TiCDC 开启了 sync_point 功能**
+    - 需要在 TiCDC 配置中启用：`enable-sync-point = true`
+    - 如果不开启 sync_point，无法获取准确的同步点 TSO 对，可能导致对比结果不准确
+  - **使用场景**：
+    - 在数据迁移/同步过程中对比特定时间点的数据一致性
+    - 对比历史时间点的数据状态
+    - 验证 CDC 同步过程中数据的一致性
+  - **获取 snapshot_ts 的方法（必须使用 CDC sync_point）**：
+    - **【推荐方法】通过 TiCDC sync_point 获取**（前提：已开启 sync_point 功能）：
+      在下游集群执行：
+      ```sql
+      SELECT * FROM tidb_cdc.syncpoint_v1 ORDER BY created_at DESC LIMIT 1\G
+      ```
+      
+      返回结果示例：
+      ```
+      ***************************[ 1. row ]***************************
+      ticdc_cluster_id | default
+      changefeed       | default/test
+      primary_ts       | 462798819164160000    # 源库的 TSO，用于 src.snapshot_ts
+      secondary_ts     | 462798819559997443    # 下游的 TSO，用于 dst.snapshot_ts
+      created_at       | 2025-12-11 15:16:31
+      ```
+      
+      字段说明：
+      - `primary_ts`: 源库（上游）的 TSO，对应配置中的 `src.snapshot_ts`
+      - `secondary_ts`: 下游集群的 TSO，对应配置中的 `dst.snapshot_ts`
+      - 这两个 TSO 代表同一逻辑时间点在不同集群的快照，确保数据一致性对比的准确性
+  - **配置说明**：
+    - `src.snapshot_ts`: 源库使用的快照时间戳（19位整数）
+      - 使用 CDC sync_point 获取的 `primary_ts` 值
+    - `dst.snapshot_ts`: 目标库使用的快照时间戳（19位整数）
+      - 使用 CDC sync_point 获取的 `secondary_ts` 值
+    - 建议同时配置 `src` 和 `dst`，确保对比同一逻辑时间点的数据
+    - 如果配置了 `snapshot_ts`，工具会在连接后自动设置 `SET @@tidb_snapshot=?`
+    - **注意**：使用 `snapshot_ts` 时，查询的是历史快照数据，不是实时数据
+    - **重要**：必须使用 CDC sync_point 获取的 TSO 对，才能确保对比的是同一逻辑时间点的数据
+  - **示例（使用 CDC sync_point 获取的值）**：
+    ```ini
+    src.snapshot_ts = 462798819164160000  # primary_ts（源库的 TSO）
+    dst.snapshot_ts = 462798819559997443  # secondary_ts（下游的 TSO）
+    ```
 
 #### 并发配置
 

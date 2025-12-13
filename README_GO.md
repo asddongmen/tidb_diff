@@ -114,9 +114,49 @@ write_timeout_seconds = 0
 # For unstable networks, set to 3-5
 max_retries = 2
 
-# Optional snapshot_ts (TiDB)
-# src.snapshot_ts = 462796050923520000
-# dst.snapshot_ts = 462796051305201667
+# snapshot_ts: TiDB snapshot timestamp (optional, for comparing historical data)
+#
+# 【Important Prerequisite - Must Meet】
+# The prerequisite for using src.snapshot_ts and dst.snapshot_ts is that TiCDC sync_point feature is enabled
+# Need to enable in TiCDC configuration: enable-sync-point = true
+# Without sync_point enabled, accurate sync point TSO pairs cannot be obtained, which may lead to inaccurate comparison results
+#
+# Use cases:
+# 1. Compare data consistency at specific time points during data migration/synchronization
+# 2. Compare data states at historical time points
+# 3. Verify data consistency during CDC synchronization process
+#
+# How to get snapshot_ts (Must use CDC sync_point):
+# 【Recommended Method】Get through TiCDC sync_point (Prerequisite: sync_point feature is enabled):
+# Execute in downstream cluster:
+# SELECT * FROM tidb_cdc.syncpoint_v1 ORDER BY created_at DESC LIMIT 1\G
+#
+# Example result:
+# ***************************[ 1. row ]***************************
+# ticdc_cluster_id | default
+# changefeed       | default/test
+# primary_ts       | 462798819164160000    # Source TSO, use for src.snapshot_ts
+# secondary_ts     | 462798819559997443    # Downstream TSO, use for dst.snapshot_ts
+# created_at       | 2025-12-11 15:16:31
+#
+# Field explanation:
+# - primary_ts: Source (upstream) TSO, corresponds to src.snapshot_ts in config
+# - secondary_ts: Downstream cluster TSO, corresponds to dst.snapshot_ts in config
+# - These two TSOs represent snapshots at the same logical time point in different clusters, ensuring accuracy of data consistency comparison
+#
+# Configuration:
+# - src.snapshot_ts: Snapshot timestamp for source database (19-digit integer)
+#   - Use primary_ts value obtained from CDC sync_point
+# - dst.snapshot_ts: Snapshot timestamp for destination database (19-digit integer)
+#   - Use secondary_ts value obtained from CDC sync_point
+# - Recommend configuring both src and dst to ensure comparing data at the same logical time point
+# - If configured, tool will automatically set SET @@tidb_snapshot=? after connection
+# - Note: When using snapshot_ts, queries return historical snapshot data, not real-time data
+# - Important: Must use TSO pair from CDC sync_point to ensure comparing data at the same logical time point
+#
+# Example (using values from CDC sync_point):
+# src.snapshot_ts = 462798819164160000  # primary_ts (source TSO)
+# dst.snapshot_ts = 462798819559997443  # secondary_ts (downstream TSO)
 ```
 
 ### Configuration Options
@@ -130,6 +170,49 @@ max_retries = 2
 - `output`: CSV output file path (optional)
 - `compare`: Comparison items: `rows` (table row counts), `tables` (database-level table counts), `indexes` (database-level index counts), `views` (database-level view counts). Leave empty to enable all.
 - `src.snapshot_ts` / `dst.snapshot_ts`: TiDB snapshot timestamps (optional, for comparing historical data)
+  - **【Important Prerequisite - Must Meet】**:
+    - The **prerequisite for using `src.snapshot_ts` and `dst.snapshot_ts` is that TiCDC sync_point feature is enabled**
+    - Need to enable in TiCDC configuration: `enable-sync-point = true`
+    - Without sync_point enabled, accurate sync point TSO pairs cannot be obtained, which may lead to inaccurate comparison results
+  - **Use cases**:
+    - Compare data consistency at specific time points during data migration/synchronization
+    - Compare data states at historical time points
+    - Verify data consistency during CDC synchronization process
+  - **How to get snapshot_ts (Must use CDC sync_point)**:
+    - **【Recommended Method】Get through TiCDC sync_point** (Prerequisite: sync_point feature is enabled):
+      Execute in downstream cluster:
+      ```sql
+      SELECT * FROM tidb_cdc.syncpoint_v1 ORDER BY created_at DESC LIMIT 1\G
+      ```
+      
+      Example result:
+      ```
+      ***************************[ 1. row ]***************************
+      ticdc_cluster_id | default
+      changefeed       | default/test
+      primary_ts       | 462798819164160000    # Source TSO, use for src.snapshot_ts
+      secondary_ts     | 462798819559997443    # Downstream TSO, use for dst.snapshot_ts
+      created_at       | 2025-12-11 15:16:31
+      ```
+      
+      Field explanation:
+      - `primary_ts`: Source (upstream) TSO, corresponds to `src.snapshot_ts` in config
+      - `secondary_ts`: Downstream cluster TSO, corresponds to `dst.snapshot_ts` in config
+      - These two TSOs represent snapshots at the same logical time point in different clusters, ensuring accuracy of data consistency comparison
+  - **Configuration**:
+    - `src.snapshot_ts`: Snapshot timestamp for source database (19-digit integer)
+      - Use `primary_ts` value obtained from CDC sync_point
+    - `dst.snapshot_ts`: Snapshot timestamp for destination database (19-digit integer)
+      - Use `secondary_ts` value obtained from CDC sync_point
+    - Recommend configuring both `src` and `dst` to ensure comparing data at the same logical time point
+    - If configured, tool will automatically set `SET @@tidb_snapshot=?` after connection
+    - **Note**: When using `snapshot_ts`, queries return historical snapshot data, not real-time data
+    - **Important**: Must use TSO pair from CDC sync_point to ensure comparing data at the same logical time point
+  - **Example (using values from CDC sync_point)**:
+    ```ini
+    src.snapshot_ts = 462798819164160000  # primary_ts (source TSO)
+    dst.snapshot_ts = 462798819559997443  # secondary_ts (downstream TSO)
+    ```
 
 #### Concurrency Configuration
 
