@@ -310,13 +310,18 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 		// 使用 goroutine 和超时来关闭连接，避免阻塞
 		done := make(chan struct{})
 		go func() {
+			defer close(done)
+			// 先关闭所有空闲连接，再关闭连接池
+			srcDB.SetMaxIdleConns(0)
+			srcDB.SetMaxOpenConns(0)
 			srcDB.Close()
-			close(done)
 		}()
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
 			// 5秒超时后强制退出，避免无限等待
+			// 记录警告但不阻塞
+			errorLog("关闭源库连接超时，强制退出")
 		}
 	}()
 
@@ -329,13 +334,18 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 		// 使用 goroutine 和超时来关闭连接，避免阻塞
 		done := make(chan struct{})
 		go func() {
+			defer close(done)
+			// 先关闭所有空闲连接，再关闭连接池
+			dstDB.SetMaxIdleConns(0)
+			dstDB.SetMaxOpenConns(0)
 			dstDB.Close()
-			close(done)
 		}()
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
 			// 5秒超时后强制退出，避免无限等待
+			// 记录警告但不阻塞
+			errorLog("关闭目标库连接超时，强制退出")
 		}
 	}()
 
@@ -579,9 +589,10 @@ func (d *DBDataDiff) countTableRowsConcurrent(db *sql.DB, dbName string, tables 
 					// 避免查询时间过长导致程序卡住
 					ctx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
 				}
-				defer cancel() // 确保 context 被取消，释放资源
-
+				// 注意：cancel 必须在查询完成后立即调用，不能 defer 到函数结束
+				// 因为如果查询成功，需要立即取消 context 释放资源
 				err = db.QueryRowContext(ctx, query).Scan(&count)
+				cancel() // 立即取消 context，释放资源
 
 				if err == nil {
 					break // 成功，退出重试循环
@@ -835,13 +846,18 @@ func (d *DBDataDiff) diff(conf *ini.File) string {
 		// 使用 goroutine 和超时来关闭连接，避免阻塞
 		done := make(chan struct{})
 		go func() {
+			defer close(done)
+			// 先关闭所有空闲连接，再关闭连接池
+			srcDB.SetMaxIdleConns(0)
+			srcDB.SetMaxOpenConns(0)
 			srcDB.Close()
-			close(done)
 		}()
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
 			// 5秒超时后强制退出，避免无限等待
+			// 记录警告但不阻塞
+			errorLog("关闭源库连接超时，强制退出")
 		}
 	}()
 
@@ -882,13 +898,18 @@ func (d *DBDataDiff) diff(conf *ini.File) string {
 				// 使用 goroutine 和超时来关闭连接，避免阻塞
 				done := make(chan struct{})
 				go func() {
+					defer close(done)
+					// 先关闭所有空闲连接，再关闭连接池
+					srcDB2.SetMaxIdleConns(0)
+					srcDB2.SetMaxOpenConns(0)
 					srcDB2.Close()
-					close(done)
 				}()
 				select {
 				case <-done:
 				case <-time.After(5 * time.Second):
 					// 5秒超时后强制退出，避免无限等待
+					// 记录警告但不阻塞
+					errorLog("关闭源库连接超时，强制退出")
 				}
 			}()
 
@@ -900,13 +921,18 @@ func (d *DBDataDiff) diff(conf *ini.File) string {
 					// 使用 goroutine 和超时来关闭连接，避免阻塞
 					done := make(chan struct{})
 					go func() {
+						defer close(done)
+						// 先关闭所有空闲连接，再关闭连接池
+						dstDB2.SetMaxIdleConns(0)
+						dstDB2.SetMaxOpenConns(0)
 						dstDB2.Close()
-						close(done)
 					}()
 					select {
 					case <-done:
 					case <-time.After(5 * time.Second):
 						// 5秒超时后强制退出，避免无限等待
+						// 记录警告但不阻塞
+						errorLog("关闭目标库连接超时，强制退出")
 					}
 				}()
 
