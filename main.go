@@ -369,14 +369,14 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 		}
 	}()
 
-	// Get table lists (snapshot will be set in each goroutine's connection)
-	srcTables, err := d.getTableList(srcDB, db)
+	// Get table lists (snapshot will be set in getTableList if provided)
+	srcTables, err := d.getTableList(srcDB, db, srcSnapshotTS)
 	if err != nil {
 		errList = append(errList, fmt.Sprintf("获取源库表列表失败：%v", err))
 		return CheckResult{DBName: db, ErrList: errList, RowsForCSV: rowsForCSV}
 	}
 
-	dstTables, err := d.getTableList(dstDB, db)
+	dstTables, err := d.getTableList(dstDB, db, dstSnapshotTS)
 	if err != nil {
 		errList = append(errList, fmt.Sprintf("获取目标库表列表失败：%v", err))
 		return CheckResult{DBName: db, ErrList: errList, RowsForCSV: rowsForCSV}
@@ -476,6 +476,7 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 	}
 
 	// Compare results
+	// 首先检查源库中的所有表
 	for tableName, srcCount := range srcRet {
 		dstCount, exists := dstRet[tableName]
 		if !exists {
@@ -496,13 +497,43 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 		}
 	}
 
+	// 检查目标库中是否有源库没有的表（Bug 2 修复）
+	for tableName, dstCount := range dstRet {
+		if _, exists := srcRet[tableName]; !exists {
+			msg := fmt.Sprintf("DB【%s】的目标表: %s在源库中不存在同名的表！该表count数置为-1", db, tableName)
+			errorLog(msg)
+			errList = append(errList, tableName)
+			rowsForCSV = append(rowsForCSV, []string{db, tableName, "-1", fmt.Sprintf("%d", dstCount), "N/A", "源表不存在"})
+		}
+	}
+
 	info(fmt.Sprintf("DB【%s】校验正常结束", db))
 	return CheckResult{DBName: db, ErrList: errList, RowsForCSV: rowsForCSV}
 }
 
-func (d *DBDataDiff) getTableList(db *sql.DB, schema string) ([]string, error) {
+func (d *DBDataDiff) getTableList(db *sql.DB, schema string, snapshotTS *string) ([]string, error) {
+	// 获取连接并在连接上设置 snapshot
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	// 在当前连接上设置 snapshot（如果提供）
+	if snapshotTS != nil && *snapshotTS != "" {
+		snapshotVal, parseErr := strconv.ParseInt(*snapshotTS, 10, 64)
+		if parseErr != nil {
+			return nil, fmt.Errorf("无效的 snapshot_ts 值: %s, 错误: %v", *snapshotTS, parseErr)
+		}
+		_, setErr := conn.ExecContext(ctx, "SET @@tidb_snapshot=?", snapshotVal)
+		if setErr != nil {
+			return nil, fmt.Errorf("设置 snapshot_ts 失败: %v", setErr)
+		}
+	}
+
 	query := "SELECT table_name FROM information_schema.tables WHERE table_schema = ?"
-	rows, err := db.Query(query, schema)
+	rows, err := conn.QueryContext(ctx, query, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -747,12 +778,6 @@ func (d *DBDataDiff) diff(conf *ini.File) string {
 
 	// 是否使用统计信息快速获取行数（默认 true，速度快但可能不够精确）
 	useStats := section.Key("use_stats").MustBool(true)
-
-	// 批量大小（仅在使用精确 COUNT 时有效，默认 30 以提高性能）
-	batchSize := section.Key("batch_size").MustInt(30)
-	if batchSize < 1 {
-		batchSize = 30
-	}
 
 	// 表级别并发数（每个表独立并发统计时的并发数）
 	// 多库多表场景默认值：30（针对大量表优化）
