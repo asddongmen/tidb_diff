@@ -133,11 +133,65 @@ func (d *DBDataDiff) getConnection(instance string) (*sql.DB, error) {
 	return db, nil
 }
 
-func (d *DBDataDiff) getDBList(db *sql.DB, dbPattern string) ([]string, error) {
+// setSnapshotOnConn 在连接上设置 snapshot（支持 context）
+func (d *DBDataDiff) setSnapshotOnConn(ctx context.Context, conn *sql.Conn, snapshotTS *string) error {
+	if snapshotTS != nil && *snapshotTS != "" {
+		snapshotVal, parseErr := strconv.ParseInt(*snapshotTS, 10, 64)
+		if parseErr != nil {
+			return fmt.Errorf("无效的 snapshot_ts 值: %s, 错误: %v", *snapshotTS, parseErr)
+		}
+		_, setErr := conn.ExecContext(ctx, "SET @@tidb_snapshot=?", snapshotVal)
+		if setErr != nil {
+			return fmt.Errorf("设置 snapshot_ts 失败: %v", setErr)
+		}
+	}
+	return nil
+}
+
+// diffSortedStrings 返回两个已排序字符串切片的差集：onlyA 表示只在 a 中，onlyB 表示只在 b 中
+func diffSortedStrings(a, b []string) (onlyA, onlyB []string) {
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		if a[i] == b[j] {
+			i++
+			j++
+			continue
+		}
+		if a[i] < b[j] {
+			onlyA = append(onlyA, a[i])
+			i++
+			continue
+		}
+		onlyB = append(onlyB, b[j])
+		j++
+	}
+	for ; i < len(a); i++ {
+		onlyA = append(onlyA, a[i])
+	}
+	for ; j < len(b); j++ {
+		onlyB = append(onlyB, b[j])
+	}
+	return onlyA, onlyB
+}
+
+func (d *DBDataDiff) getDBList(db *sql.DB, dbPattern string, snapshotTS *string) ([]string, error) {
+	// 获取连接并在连接上设置 snapshot
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	// 在当前连接上设置 snapshot（如果提供）
+	if err := d.setSnapshotOnConn(ctx, conn, snapshotTS); err != nil {
+		return nil, err
+	}
+
 	// Escape % for SQL LIKE pattern (same as Python: db_pattern.replace("%", "%%"))
 	escapedPattern := strings.ReplaceAll(dbPattern, "%", "%%")
 	query := "SELECT SCHEMA_NAME AS db_name FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME LIKE ?"
-	rows, err := db.Query(query, escapedPattern)
+	rows, err := conn.QueryContext(ctx, query, escapedPattern)
 	if err != nil {
 		return nil, err
 	}
@@ -176,15 +230,8 @@ func (d *DBDataDiff) getSchemaObjectCounts(db *sql.DB, snapshotTS *string) (*Sch
 	defer conn.Close()
 
 	// 在当前连接上设置 snapshot（如果提供）
-	if snapshotTS != nil && *snapshotTS != "" {
-		snapshotVal, parseErr := strconv.ParseInt(*snapshotTS, 10, 64)
-		if parseErr != nil {
-			return nil, fmt.Errorf("无效的 snapshot_ts 值: %s, 错误: %v", *snapshotTS, parseErr)
-		}
-		_, setErr := conn.ExecContext(ctx, "SET @@tidb_snapshot=?", snapshotVal)
-		if setErr != nil {
-			return nil, fmt.Errorf("设置 snapshot_ts 失败: %v", setErr)
-		}
+	if err := d.setSnapshotOnConn(ctx, conn, snapshotTS); err != nil {
+		return nil, err
 	}
 
 	// Count tables
@@ -320,6 +367,7 @@ type CheckResult struct {
 func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, threshold int, useStats bool, tableConcurrency int, srcSnapshotTS, dstSnapshotTS *string) CheckResult {
 	errList := []string{}
 	rowsForCSV := [][]string{}
+	var errListMu sync.Mutex // 保护 errList 的并发访问
 
 	srcDB, err := d.getConnection(src)
 	if err != nil {
@@ -331,9 +379,6 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			// 先关闭所有空闲连接，再关闭连接池
-			srcDB.SetMaxIdleConns(0)
-			srcDB.SetMaxOpenConns(0)
 			srcDB.Close()
 		}()
 		select {
@@ -355,9 +400,6 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			// 先关闭所有空闲连接，再关闭连接池
-			dstDB.SetMaxIdleConns(0)
-			dstDB.SetMaxOpenConns(0)
 			dstDB.Close()
 		}()
 		select {
@@ -385,6 +427,26 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 	// Remove ignored tables
 	srcTables = d.removeIgnoredTables(srcTables, ignoreTables)
 	dstTables = d.removeIgnoredTables(dstTables, ignoreTables)
+
+	// 表数量一致也需要校验表名集合是否一致（避免后续统计/COUNT 白跑）
+	// 依赖 getTableList 已排序 + removeIgnoredTables 保持顺序
+	onlySrc, onlyDst := diffSortedStrings(srcTables, dstTables)
+	if len(onlySrc) > 0 || len(onlyDst) > 0 {
+		msg := fmt.Sprintf("【%s】源库和目标库表清单不一致，校验异常退出！src_only=%v, dst_only=%v", db, onlySrc, onlyDst)
+		errorLog(msg)
+		errList = append(errList, msg)
+		for _, t := range onlySrc {
+			// 目的端缺表
+			errList = append(errList, t)
+			rowsForCSV = append(rowsForCSV, []string{db, t, "-1", "-1", "N/A", "目的表不存在"})
+		}
+		for _, t := range onlyDst {
+			// 源端缺表
+			errList = append(errList, t)
+			rowsForCSV = append(rowsForCSV, []string{db, t, "-1", "-1", "N/A", "源表不存在"})
+		}
+		return CheckResult{DBName: db, ErrList: errList, RowsForCSV: rowsForCSV}
+	}
 
 	if len(srcTables) != len(dstTables) {
 		msg := fmt.Sprintf("【%s】源库和目标库表个数不一致，校验异常退出！", db)
@@ -421,7 +483,9 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 			defer statsWg.Done()
 			srcData, srcErr = d.getTableRowCountsFromStats(srcDB, db, srcTables, srcSnapshotTS)
 			if srcErr != nil {
+				errListMu.Lock()
 				errList = append(errList, fmt.Sprintf("从统计信息获取源库行数失败：%v", srcErr))
+				errListMu.Unlock()
 			}
 		}()
 
@@ -429,7 +493,9 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 			defer statsWg.Done()
 			dstData, dstErr = d.getTableRowCountsFromStats(dstDB, db, dstTables, dstSnapshotTS)
 			if dstErr != nil {
+				errListMu.Lock()
 				errList = append(errList, fmt.Sprintf("从统计信息获取目标库行数失败：%v", dstErr))
+				errListMu.Unlock()
 			}
 		}()
 
@@ -453,7 +519,9 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 			defer countWg.Done()
 			srcData, srcErrList = d.countTableRowsConcurrent(srcDB, db, srcTables, tableConcurrency, srcSnapshotTS)
 			for _, err := range srcErrList {
+				errListMu.Lock()
 				errList = append(errList, err.Error())
+				errListMu.Unlock()
 			}
 		}()
 
@@ -462,7 +530,9 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 			defer countWg.Done()
 			dstData, dstErrList = d.countTableRowsConcurrent(dstDB, db, dstTables, tableConcurrency, dstSnapshotTS)
 			for _, err := range dstErrList {
+				errListMu.Lock()
 				errList = append(errList, err.Error())
+				errListMu.Unlock()
 			}
 		}()
 
@@ -497,7 +567,6 @@ func (d *DBDataDiff) checkSingleDB(db, src, dst string, ignoreTables []string, t
 		}
 	}
 
-	// 检查目标库中是否有源库没有的表（Bug 2 修复）
 	for tableName, dstCount := range dstRet {
 		if _, exists := srcRet[tableName]; !exists {
 			msg := fmt.Sprintf("DB【%s】的目标表: %s在源库中不存在同名的表！该表count数置为-1", db, tableName)
@@ -521,15 +590,8 @@ func (d *DBDataDiff) getTableList(db *sql.DB, schema string, snapshotTS *string)
 	defer conn.Close()
 
 	// 在当前连接上设置 snapshot（如果提供）
-	if snapshotTS != nil && *snapshotTS != "" {
-		snapshotVal, parseErr := strconv.ParseInt(*snapshotTS, 10, 64)
-		if parseErr != nil {
-			return nil, fmt.Errorf("无效的 snapshot_ts 值: %s, 错误: %v", *snapshotTS, parseErr)
-		}
-		_, setErr := conn.ExecContext(ctx, "SET @@tidb_snapshot=?", snapshotVal)
-		if setErr != nil {
-			return nil, fmt.Errorf("设置 snapshot_ts 失败: %v", setErr)
-		}
+	if err := d.setSnapshotOnConn(ctx, conn, snapshotTS); err != nil {
+		return nil, err
 	}
 
 	query := "SELECT table_name FROM information_schema.tables WHERE table_schema = ?"
@@ -626,27 +688,14 @@ func (d *DBDataDiff) countTableRowsConcurrent(db *sql.DB, dbName string, tables 
 				}
 
 				// 在当前连接上设置 snapshot（如果提供）
-				if snapshotTS != nil && *snapshotTS != "" {
-					snapshotVal, parseErr := strconv.ParseInt(*snapshotTS, 10, 64)
-					if parseErr != nil {
-						conn.Close()
-						cancel()
-						err = fmt.Errorf("无效的 snapshot_ts 值: %s, 错误: %v", *snapshotTS, parseErr)
-						if retry == d.maxRetries {
-							break
-						}
-						continue
+				if setErr := d.setSnapshotOnConn(ctx, conn, snapshotTS); setErr != nil {
+					conn.Close()
+					cancel()
+					err = setErr
+					if retry == d.maxRetries {
+						break
 					}
-					_, setErr := conn.ExecContext(ctx, "SET @@tidb_snapshot=?", snapshotVal)
-					if setErr != nil {
-						conn.Close()
-						cancel()
-						err = fmt.Errorf("设置 snapshot_ts 失败: %v", setErr)
-						if retry == d.maxRetries {
-							break
-						}
-						continue
-					}
+					continue
 				}
 
 				// 使用当前连接执行查询
@@ -731,15 +780,8 @@ func (d *DBDataDiff) getTableRowCountsFromStats(db *sql.DB, schema string, table
 	defer conn.Close()
 
 	// 在当前连接上设置 snapshot（如果提供）
-	if snapshotTS != nil && *snapshotTS != "" {
-		snapshotVal, parseErr := strconv.ParseInt(*snapshotTS, 10, 64)
-		if parseErr != nil {
-			return nil, fmt.Errorf("无效的 snapshot_ts 值: %s, 错误: %v", *snapshotTS, parseErr)
-		}
-		_, setErr := conn.ExecContext(ctx, "SET @@tidb_snapshot=?", snapshotVal)
-		if setErr != nil {
-			return nil, fmt.Errorf("设置 snapshot_ts 失败: %v", setErr)
-		}
+	if err := d.setSnapshotOnConn(ctx, conn, snapshotTS); err != nil {
+		return nil, err
 	}
 
 	args = append([]interface{}{schema}, args...)
@@ -921,9 +963,6 @@ func (d *DBDataDiff) diff(conf *ini.File) string {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			// 先关闭所有空闲连接，再关闭连接池
-			srcDB.SetMaxIdleConns(0)
-			srcDB.SetMaxOpenConns(0)
 			srcDB.Close()
 		}()
 		select {
@@ -937,12 +976,16 @@ func (d *DBDataDiff) diff(conf *ini.File) string {
 
 	var dbs []string
 	dbSet := make(map[string]bool)
+	var srcSnapshotTSPtr *string
+	if srcSnapshotTS != "" {
+		srcSnapshotTSPtr = &srcSnapshotTS
+	}
 	for _, pattern := range dbPatterns {
 		pattern = strings.TrimSpace(pattern)
 		if pattern == "" {
 			continue
 		}
-		dbList, err := d.getDBList(srcDB, pattern)
+		dbList, err := d.getDBList(srcDB, pattern, srcSnapshotTSPtr)
 		if err != nil {
 			errorLog(fmt.Sprintf("获取数据库列表失败：%v", err))
 			continue
@@ -973,9 +1016,6 @@ func (d *DBDataDiff) diff(conf *ini.File) string {
 				done := make(chan struct{})
 				go func() {
 					defer close(done)
-					// 先关闭所有空闲连接，再关闭连接池
-					srcDB2.SetMaxIdleConns(0)
-					srcDB2.SetMaxOpenConns(0)
 					srcDB2.Close()
 				}()
 				select {
@@ -996,9 +1036,6 @@ func (d *DBDataDiff) diff(conf *ini.File) string {
 					done := make(chan struct{})
 					go func() {
 						defer close(done)
-						// 先关闭所有空闲连接，再关闭连接池
-						dstDB2.SetMaxIdleConns(0)
-						dstDB2.SetMaxOpenConns(0)
 						dstDB2.Close()
 					}()
 					select {
