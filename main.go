@@ -407,13 +407,6 @@ func (d *DBDataDiff) checkSingleDB(db string, srcDB, dstDB *sql.DB, ignoreTables
 		return CheckResult{DBName: db, ErrList: errList, RowsForCSV: rowsForCSV}
 	}
 
-	if len(srcTables) != len(dstTables) {
-		msg := fmt.Sprintf("【%s】源库和目标库表个数不一致，校验异常退出！", db)
-		errorLog(msg)
-		errList = append(errList, msg)
-		return CheckResult{DBName: db, ErrList: errList, RowsForCSV: rowsForCSV}
-	}
-
 	if len(srcTables) == 0 {
 		msg := fmt.Sprintf("【%s】源库和目标库都是空的，不做校验退出", db)
 		errorLog(msg)
@@ -560,7 +553,6 @@ func (d *DBDataDiff) getTableList(db *sql.DB, schema string, snapshotTS *string)
 		}
 		tables = append(tables, tableName)
 	}
-	sort.Strings(tables)
 	return tables, rows.Err()
 }
 
